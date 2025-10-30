@@ -6,7 +6,6 @@ import os
 from datetime import datetime, timedelta
 import astrbot.api.message_components as Comp
 from astrbot.api.message_components import At
-import random
 
 # 数据持久化，存 data 目录下
 # AstrBot 推荐插件数据存储: data/plugins/data-invitecount/invite_data.json
@@ -78,19 +77,6 @@ class InviteQueryPlugin(Star):
         except Exception as e:
             logger.error(f"保存邀请数据失败：{e}")
 
-    def get_random_bgimg_path(self):
-        """自动查找 plugin-data/invitecount_images/ 下背景，返回一个本地文件或None"""
-        folder = os.path.join(os.path.dirname(self.data_file), 'invitecount_images')
-        if not os.path.exists(folder):
-            try:
-                os.makedirs(folder, exist_ok=True)
-            except Exception:
-                return None
-        imgs = [f for f in os.listdir(folder) if f.lower().endswith(('.png','.jpg','.jpeg','.webp'))]
-        if not imgs:
-            return None
-        return os.path.join(folder, random.choice(imgs))
-
     async def try_get_nickname(self, group_id, user_id):
         """优先查昵称，有接口用接口，无则直接ID"""
         try:
@@ -138,25 +124,6 @@ class InviteQueryPlugin(Star):
         except Exception as e:
             logger.info(f'[invite debug] get_group_member_list失败: {e}')
         return name
-
-    async def try_render_html(self, event, html_body, data, fallback_text):
-        """尝试用 AstrBot 图片渲染接口(html_render)输出，支持随机本地背景，失败则返回文本。"""
-        if not self.config.get("enable_image_render", False):
-            yield event.plain_result(fallback_text)
-            return
-        # 插入背景图相关css
-        bgimg_path = self.get_random_bgimg_path()
-        if bgimg_path:
-            bgimg_css = f"background-image:url('file://{bgimg_path}');background-size:cover;background-position:center;background-repeat:no-repeat;"
-        else:
-            bgimg_css = "background:#fff;"
-        html_body = html_body.replace("background:__BG__;", bgimg_css)
-        try:
-            url = await self.html_render(html_body, data, return_url=True)
-            yield event.image_result(url)
-        except Exception as e:
-            logger.info(f'[invite debug] 图片渲染失败: {e}')
-            yield event.plain_result(fallback_text)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
     async def handle_group_event(self, event: AstrMessageEvent):
@@ -325,26 +292,7 @@ class InviteQueryPlugin(Star):
         msg += datetime.now().strftime('%Y/%m/%d %H:%M:%S')
         if created:
             msg = "【提示】该用户暂无数据，已帮你新建统计模板！\n" + msg
-        # 构建HTML模板
-        html_body = f"""
-        <div style='background:__BG__;border-radius:9px;padding:13px 17px 12px 19px;border:1.5px solid #68afff;min-width:290px;max-width:390px;box-shadow:0 2px 7px #b3d6fa;color:#212c47;'>
-        <h2 style='margin-top:0;color:#258df9;text-align:center;font-family:sans-serif'>邀请统计</h2>
-        <table style='width:100%;font-size:15.5px;'>
-            <tr><td>被查用户：</td><td>{name}</td></tr>
-            <tr><td>用户QQ：</td><td>{user_id}</td></tr>
-            <tr><td>邀请人：</td><td>{inviter_display}</td></tr>
-            <tr><td>进群方式：</td><td>{join_type}</td></tr>
-            <tr><td>进群时间：</td><td>{days_ago}</td></tr>
-            <tr><td>累计邀请：</td><td>{total_invite} 人</td></tr>
-            <tr><td>被踢人数：</td><td>{kicked} 人</td></tr>
-            <tr><td>自己退群：</td><td>{leave} 人</td></tr>
-            <tr><td>有效邀请：</td><td>{valid_invite} 人</td></tr>
-        </table>
-        <div style='color:#888;font-size:12px;text-align:right;'>数据统计 &ndash; {datetime.now().strftime('%Y/%m/%d %H:%M:%S')}</div>
-        </div>
-        """
-        async for result in self.try_render_html(event, html_body, {}, msg):
-            yield result
+        yield event.plain_result(msg)
 
     @filter.command("我的邀请")
     async def cmd_my_invite(self, event: AstrMessageEvent):
@@ -356,12 +304,10 @@ class InviteQueryPlugin(Star):
     @filter.command("邀请排行")
     async def cmd_invite_rank(self, event: AstrMessageEvent, mode: str = ""):
         """排行模式说明:
-        /邀请排行         # 有效邀请排行（全量）
-        /邀请排行 总      # 总邀请排行
-        /邀请排行 差      # 无效邀请排行
-        /邀请排行 周      # 最近7天新邀请有效人数排行
-        /邀请排行 月      # 最近30天新邀请有效人数排行
-        /邀请排行 帮助    # 帮助
+        /邀请排行         # 有效邀请数排行（有效 = 未退群/未被踢）
+        /邀请排行 总      # 按总邀请数排行
+        /邀请排行 差      # 按无效邀请数排行（被踢+自己退群之和）
+        /邀请排行 帮助    # 展示用法说明
         """
         text = "====邀请排行====\n"
         args = (event.message_str or '').strip().split()
@@ -369,62 +315,44 @@ class InviteQueryPlugin(Star):
             mode = args[1].strip()
         if mode in {"help", "帮助", "h", "?"}:
             text += (
-                "/邀请排行              —— 全量有效邀请排行\n"
+                "/邀请排行              —— 有效邀请排行\n"
                 "/邀请排行 总（或 总人数）—— 总邀请排行\n"
-                "/邀请排行 差（或 无效人数）—— 无效邀请排行\n"
-                "/邀请排行 周            —— 最近7天邀请排行\n"
-                "/邀请排行 月            —— 最近30天邀请排行\n"
+                "/邀请排行 差（或 无效人数）—— 无效邀请排行（被踢+退群）\n"
                 "/邀请排行 帮助         —— 显示本帮助\n"
             )
             yield event.plain_result(text)
             return
-        # 统计范围选择
-        now = datetime.now()
-        cutoff = None
-        period_display = "全量"
-        if mode in {"周","week"}:
-            cutoff = now - timedelta(days=7)
-            period_display = "最近7天"
-        elif mode in {"月","month"}:
-            cutoff = now - timedelta(days=30)
-            period_display = "最近30天"
-        # 汇总数据生成
-        count_map = {}  # inviter: [有效, 总, 无效]
-        inviter_name_map = {}
+
+        # 汇总数据生成：所有邀请者ID，映射为 总/有效/无效数目
+        count_map = {}   # inviter: [有效, 总, 无效]
+        inviter_name_map = {}  # inviter: 昵称
         for v in self.invite_data.values():
             inviter = v.get("inviter")
-            join_time_str = v.get("join_time")
-            # 判断是否在时间窗口内
-            in_time = True
-            if cutoff and join_time_str:
-                try:
-                    join_dt = datetime.strptime(join_time_str, '%Y-%m-%d %H:%M:%S')
-                    in_time = join_dt >= cutoff
-                except Exception:
-                    in_time = False
-            if not inviter or (cutoff and not in_time):
-                continue
+            if not inviter: continue
             is_invalid = (v.get("leave_type") is not None)
             if inviter not in count_map:
-                count_map[inviter] = [0, 0, 0]  # 有效, 总, 无效
-            count_map[inviter][1] += 1  # 总
+                count_map[inviter] = [0,0,0] # 有效, 总, 无效
+            count_map[inviter][1] += 1 # 总数
             if not is_invalid:
-                count_map[inviter][0] += 1  # 有效
+                count_map[inviter][0] += 1 # 有效
             else:
-                count_map[inviter][2] += 1  # 无效
+                count_map[inviter][2] += 1 # 无效
+            # 邀请人昵称（如有）
             if inviter not in inviter_name_map or not inviter_name_map[inviter]:
                 inviter_name_map[inviter] = self.invite_data.get(inviter, {}).get("nickname", inviter)
+
         # 排序模式
         display_mode = "有效邀请"
         if mode in {"总", "全部", "all", "人数", "总人数"}:
-            sort_key = 1  # 总
+            sort_key = 1  # 总数
             display_mode = "总邀请"
         elif mode in {"差", "失效", "无效", "无效人数"}:
             sort_key = 2  # 无效
             display_mode = "无效邀请"
         else:
             sort_key = 0  # 有效
-            display_mode = f"{period_display}{display_mode}"
+            display_mode = "有效邀请"
+
         sorted_list = sorted(count_map.items(), key=lambda x: -x[1][sort_key])
         text += f"({display_mode}排行，前10)\n"
         for idx, (uid, tpl) in enumerate(sorted_list[:10], 1):
@@ -434,40 +362,12 @@ class InviteQueryPlugin(Star):
             )
         if not sorted_list:
             text += "无邀请记录\n"
-        # HTML榜模板
-        rows_html = "".join(
-            f"<tr><td style='padding:0 10px 0 0;color:#2e7ab0;font-weight:bold'>{idx}.</td>"
-            f"<td style='text-align:left;font-weight:bold;color:#253570'>{inviter_name_map.get(uid,uid)}</td>"
-            f"<td style='color:#777;font-size:13.5px'>({uid})</td>"
-            f"<td style='padding-left:10px;color:#2e885b'>有效:{tpl[0]}</td>"
-            f"<td style='color:#394984'>总:{tpl[1]}</td>"
-            f"<td style='color:#cc5427'>无效:{tpl[2]}</td></tr>"
-            for idx, (uid, tpl) in enumerate(sorted_list[:10], 1))
-        html_body = f"""
-        <div style='background:__BG__;border-radius:9px;padding:8px 14px 9px 15px;border:1.7px solid #65be89;min-width:330px;max-width:450px;box-shadow:0 2px 8px #c7e2d0;color:#253570;'>
-        <h2 style='text-align:center;color:#36be89;margin:0 0 7px 0;'>排行榜TOP10</h2>
-        <table style='font-size:15px;width:100%;border-spacing:2px 3px;'>
-        {rows_html if rows_html else "<tr><td colspan='6' style='color:#aaa'>无邀请记录</td></tr>"}
-        </table>
-        <div style='color:#999;font-size:12px;text-align:right;margin-top:7px;'>{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}</div>
-        </div>
-        """
-        async for result in self.try_render_html(event, html_body, {}, text):
-            yield result
+        yield event.plain_result(text)
 
     @filter.command("邀请奖励")
     async def cmd_invite_reward(self, event: AstrMessageEvent):
         msg = self.config.get("reward_message", "暂无奖励内容\n请联系管理员在WebUI配置奖励说明")
-        html_body = f"""
-        <div style='background:__BG__;border-radius:13px;padding:16px 16px 20px 15px;font-family:Arial,sans-serif;font-size:18px;box-shadow:0 2px 11px #f1ab9c;width:330px;color:#442210;'>
-            <span style='font-weight:bold;color:#ff6918;font-size:19px'>🎁邀请奖励</span>
-            <hr style='border:none;border-top:1px solid #eee;margin:9px 0 11px 0'>
-            <div style='font-size:15px;color:#252111'>{msg.replace('\n','<br>')}</div>
-            <div style='text-align:right;font-size:11.2px;color:#866;margin-top:12px;'>奖励内容由WebUI配置</div>
-        </div>
-        """
-        async for result in self.try_render_html(event, html_body, {}, msg):
-            yield result
+        yield event.plain_result(msg)
 
     async def terminate(self):
         # 卸载插件时可扩展资源释放逻辑
