@@ -140,37 +140,16 @@ class InviteQueryPlugin(Star):
         return name
 
     async def try_render_html(self, event, html_body, data, fallback_text):
-        """尝试用 AstrBot 图片渲染接口(html_render)输出，支持随机本地背景且卡片全填充，失败则返回文本。"""
+        """尝试用 AstrBot 图片渲染接口(html_render)输出，支持随机本地背景，失败则返回文本。"""
         if not self.config.get("enable_image_render", False):
             yield event.plain_result(fallback_text)
             return
+        # 插入背景图相关css
         bgimg_path = self.get_random_bgimg_path()
         if bgimg_path:
-            safe_img_path = bgimg_path.replace(os.sep, '/')
-            # 保证兼容 windows 路径+file://协议
-            if not safe_img_path.startswith("file:///"):
-                if safe_img_path.startswith("/"):
-                    safe_img_path = "file://" + safe_img_path
-                else:
-                    safe_img_path = "file:///" + safe_img_path
-            bgimg_css = (
-                f"background-image:url('{safe_img_path}');"
-                "background-size:cover;"
-                "background-repeat:no-repeat;"
-                "background-position:center center;"
-                "min-width:410px;max-width:560px;min-height:230px;"
-                "box-sizing:border-box;border-radius:20px;"
-                "box-shadow:0 4px 32px #42545c44;"
-                "overflow:hidden;padding:0;"
-            )
+            bgimg_css = f"background-image:url('file://{bgimg_path}');background-size:cover;background-position:center;background-repeat:no-repeat;"
         else:
-            bgimg_css = (
-                "background:linear-gradient(120deg,#fdf6ee 0%,#dbe9fa 100%);"
-                "min-width:410px;max-width:560px;min-height:230px;"
-                "box-sizing:border-box;border-radius:20px;"
-                "box-shadow:0 4px 32px #42545c44;"
-                "overflow:hidden;padding:0;"
-            )
+            bgimg_css = "background:#fff;"
         html_body = html_body.replace("background:__BG__;", bgimg_css)
         try:
             url = await self.html_render(html_body, data, return_url=True)
@@ -346,29 +325,24 @@ class InviteQueryPlugin(Star):
         msg += datetime.now().strftime('%Y/%m/%d %H:%M:%S')
         if created:
             msg = "【提示】该用户暂无数据，已帮你新建统计模板！\n" + msg
-        # 新美观卡片布局
+        # 构建HTML模板
         html_body = f"""
-<div style='background:__BG__;'>
-  <div style='background:rgba(255,255,255,0.82);backdrop-filter: blur(7.2px);margin:18px 18px 14px 18px;padding:22px 22px 10px 20px;border-radius:15px;box-shadow:0 1.5px 8.5px #58ace266;'>
-    <div style='display:flex;align-items:flex-end;justify-content:space-between;'>
-      <div style='font-weight:800;font-size:1.47rem;color:#395db6;text-shadow:0 2px 10px #f4f8ff;margin-bottom:2px;letter-spacing:2px'>邀请统计</div>
-      <div style='font-size:0.97rem;color:#888'>{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}</div>
-    </div>
-    <hr style='border:none;border-top:1.3px solid #dbe7fe;margin:7.5px 0 13px 0'>
-    <table style='width:100%;font-size:1.01rem;line-height:2.18em;color:#333;'>
-        <tr><td style='color:#888;width:75px'>被查用户</td><td style='font-weight:bold'>{name}</td></tr>
-        <tr><td style='color:#888;'>用户QQ</td><td>{user_id}</td></tr>
-        <tr><td style='color:#888;'>邀请人</td><td>{inviter_display}</td></tr>
-        <tr><td style='color:#888;'>进群方式</td><td>{join_type}</td></tr>
-        <tr><td style='color:#888;'>进群时间</td><td>{days_ago}</td></tr>
-        <tr><td style='color:#888;'>累计邀请</td><td>{total_invite} 人</td></tr>
-        <tr><td style='color:#888;'>被踢人数</td><td>{kicked} 人</td></tr>
-        <tr><td style='color:#888;'>自己退群</td><td>{leave} 人</td></tr>
-        <tr><td style='color:#de5d62;'>有效邀请</td><td><b>{valid_invite} 人</b></td></tr>
-    </table>
-  </div>
-</div>
-"""
+        <div style='background:__BG__;border-radius:9px;padding:13px 17px 12px 19px;border:1.5px solid #68afff;min-width:290px;max-width:390px;box-shadow:0 2px 7px #b3d6fa;color:#212c47;'>
+        <h2 style='margin-top:0;color:#258df9;text-align:center;font-family:sans-serif'>邀请统计</h2>
+        <table style='width:100%;font-size:15.5px;'>
+            <tr><td>被查用户：</td><td>{name}</td></tr>
+            <tr><td>用户QQ：</td><td>{user_id}</td></tr>
+            <tr><td>邀请人：</td><td>{inviter_display}</td></tr>
+            <tr><td>进群方式：</td><td>{join_type}</td></tr>
+            <tr><td>进群时间：</td><td>{days_ago}</td></tr>
+            <tr><td>累计邀请：</td><td>{total_invite} 人</td></tr>
+            <tr><td>被踢人数：</td><td>{kicked} 人</td></tr>
+            <tr><td>自己退群：</td><td>{leave} 人</td></tr>
+            <tr><td>有效邀请：</td><td>{valid_invite} 人</td></tr>
+        </table>
+        <div style='color:#888;font-size:12px;text-align:right;'>数据统计 &ndash; {datetime.now().strftime('%Y/%m/%d %H:%M:%S')}</div>
+        </div>
+        """
         async for result in self.try_render_html(event, html_body, {}, msg):
             yield result
 
@@ -462,47 +436,36 @@ class InviteQueryPlugin(Star):
             text += "无邀请记录\n"
         # HTML榜模板
         rows_html = "".join(
-            f"<tr>"
-            f"<td style='font-weight:bold;font-size:1.08em;color:{'#f5ad2e' if idx==1 else ('#bebebe' if idx==2 else ('#e3925d' if idx==3 else '#30b88d'))};'>{idx}.</td>"
-            f"<td style='font-weight:bold;color:#204891'>{inviter_name_map.get(uid,uid)}</td>"
-            f"<td style='color:#988;font-size:0.92em'>({uid})</td>"
-            f"<td style='padding-left:10px;color:#319c5b'>有效:{tpl[0]}</td>"
-            f"<td style='color:#356bb6'>总:{tpl[1]}</td>"
-            f"<td style='color:#b85d36'>无效:{tpl[2]}</td>"
-            f"</tr>"
-            for idx, (uid, tpl) in enumerate(sorted_list[:10], 1)
-        )
+            f"<tr><td style='padding:0 10px 0 0;color:#2e7ab0;font-weight:bold'>{idx}.</td>"
+            f"<td style='text-align:left;font-weight:bold;color:#253570'>{inviter_name_map.get(uid,uid)}</td>"
+            f"<td style='color:#777;font-size:13.5px'>({uid})</td>"
+            f"<td style='padding-left:10px;color:#2e885b'>有效:{tpl[0]}</td>"
+            f"<td style='color:#394984'>总:{tpl[1]}</td>"
+            f"<td style='color:#cc5427'>无效:{tpl[2]}</td></tr>"
+            for idx, (uid, tpl) in enumerate(sorted_list[:10], 1))
         html_body = f"""
-<div style='background:__BG__;'>
-  <div style='background:rgba(255,255,255,0.80);backdrop-filter: blur(6.6px);margin:14px 17px 17px 17px;padding:17px 18px 16px 17px;border-radius:15px;'>
-    <div style='font-weight:800;font-size:1.32rem;color:#30b88d;letter-spacing:1.5px;margin-bottom:2.7px;text-shadow:0 2px 12px #eaffeeab;'>🎉 邀请排行榜 TOP10</div>
-    <hr style='border:none;border-top:1.1px solid #c6efe2;margin:6.5px 0 12px 0'>
-    <table style='width:100%;font-size:1.05rem;line-height:1.9em;'>
-    {rows_html if rows_html else "<tr><td colspan='6' style='color:#bbb'>暂无邀请记录</td></tr>"}
-    </table>
-    <div style='color:#999;font-size:0.91rem;text-align:right;margin-top:7.5px;'>
-        {datetime.now().strftime('%Y/%m/%d %H:%M:%S')}</div>
-  </div>
-</div>
-"""
+        <div style='background:__BG__;border-radius:9px;padding:8px 14px 9px 15px;border:1.7px solid #65be89;min-width:330px;max-width:450px;box-shadow:0 2px 8px #c7e2d0;color:#253570;'>
+        <h2 style='text-align:center;color:#36be89;margin:0 0 7px 0;'>排行榜TOP10</h2>
+        <table style='font-size:15px;width:100%;border-spacing:2px 3px;'>
+        {rows_html if rows_html else "<tr><td colspan='6' style='color:#aaa'>无邀请记录</td></tr>"}
+        </table>
+        <div style='color:#999;font-size:12px;text-align:right;margin-top:7px;'>{datetime.now().strftime('%Y/%m/%d %H:%M:%S')}</div>
+        </div>
+        """
         async for result in self.try_render_html(event, html_body, {}, text):
             yield result
 
     @filter.command("邀请奖励")
     async def cmd_invite_reward(self, event: AstrMessageEvent):
         msg = self.config.get("reward_message", "暂无奖励内容\n请联系管理员在WebUI配置奖励说明")
-        # 提前处理html内容中的换行
-        msg_html = msg.replace("\n", "<br>")
         html_body = f"""
-<div style='background:__BG__;'>
-  <div style='background:rgba(255,255,255,0.92);backdrop-filter: blur(5.5px);margin:17px 23px 18px 18px;padding:16px 17px 15px 19px;border-radius:14px;'>
-    <div style='text-align:center;font-weight:bold;color:#f49a1e;font-size:1.38rem;letter-spacing:2px;text-shadow:0 3px 22px #ffe6bf91;'>🎁邀请奖励</div>
-    <hr style='border:none;border-top:1px solid #fae5be;margin:9.5px 0 13px 0'>
-    <div style='font-size:1.07rem;color:#8d5a19;padding:6px 3px 10px 3px;'>{msg_html}</div>
-    <div style='text-align:right;font-size:.91rem;color:#b7ab7d;margin-top:13px;'>奖励内容由WebUI配置</div>
-  </div>
-</div>
-"""
+        <div style='background:__BG__;border-radius:13px;padding:16px 16px 20px 15px;font-family:Arial,sans-serif;font-size:18px;box-shadow:0 2px 11px #f1ab9c;width:330px;color:#442210;'>
+            <span style='font-weight:bold;color:#ff6918;font-size:19px'>🎁邀请奖励</span>
+            <hr style='border:none;border-top:1px solid #eee;margin:9px 0 11px 0'>
+            <div style='font-size:15px;color:#252111'>{msg.replace('\n','<br>')}</div>
+            <div style='text-align:right;font-size:11.2px;color:#866;margin-top:12px;'>奖励内容由WebUI配置</div>
+        </div>
+        """
         async for result in self.try_render_html(event, html_body, {}, msg):
             yield result
 
