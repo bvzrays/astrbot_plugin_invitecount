@@ -14,40 +14,21 @@ import random
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 INVITE_DATA_FILE = os.path.join(DATA_DIR, 'invite_data.json')
 
-def load_data():
-    if os.path.exists(INVITE_DATA_FILE):
-        with open(INVITE_DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_data(data):
-    with open(INVITE_DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2, default=str)
-
-def get_global_plugin_data_file(context):
+def get_event_field(event, field_name):
     """
-    返回主 data/plugin-data/invitecount.json 路径（与 plugins 并列，支持多环境）
+    从事件对象中获取指定字段，支持多种协议。
     """
-    # 推荐优先用 context.data_dir
-    base = getattr(context, 'data_dir', None)
-    if base and os.path.isdir(base):
-        root = base
-    else:
-        # 向上递归找 'data' 目录
-        now = os.path.abspath(os.path.dirname(__file__))
-        while True:
-            if os.path.basename(now) == 'data':
-                root = now
-                break
-            parent = os.path.dirname(now)
-            if parent == now:
-                # 极端情况 fallback
-                root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../data'))
-                break
-            now = parent
-    plugin_data_dir = os.path.join(root, 'plugin-data')
-    os.makedirs(plugin_data_dir, exist_ok=True)
-    return os.path.join(plugin_data_dir, 'invitecount.json')
+    if hasattr(event, field_name):
+        return getattr(event, field_name)
+    if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'raw_message'):
+        raw_msg = event.message_obj.raw_message
+        if field_name == 'group_id':
+            return raw_msg.get('group_id') or raw_msg.get('groupId') or raw_msg.get('chat_id') or raw_msg.get('group')
+        elif field_name == 'user_id':
+            return raw_msg.get('user_id') or raw_msg.get('target_id') or raw_msg.get('member_id') or raw_msg.get('userId') or raw_msg.get('member')
+        elif field_name == 'operator_id':
+            return raw_msg.get('operator_id') or raw_msg.get('inviter_id') or raw_msg.get('operator_user_id') or raw_msg.get('operatorUid') or raw_msg.get('inviter')
+    return None
 
 @register("invite_query", "bvzrays", "群邀请统计插件", "1.0.0")
 class InviteQueryPlugin(Star):
@@ -55,7 +36,7 @@ class InviteQueryPlugin(Star):
         super().__init__(context)
         self.config = config or AstrBotConfig({"only_stat_valid": False, "allow_at_query": True, "show_inviter": True})
         logger.debug(f"[invite-plugin] 配置已注入/初始化: {dict(self.config or {})}")
-        self.data_file = get_global_plugin_data_file(self.context)
+        self.data_file = os.path.join(context.get_data_dir(), 'plugin-data', 'invitecount.json')
         self.invite_data = self.load_data()
 
     async def initialize(self):
@@ -72,7 +53,7 @@ class InviteQueryPlugin(Star):
                 logger.error(f"加载邀请数据失败：{e}")
         return {}
 
-    def save(self):
+    def save_data(self):
         try:
             with open(self.data_file, "w", encoding="utf-8") as f:
                 json.dump(self.invite_data, f, ensure_ascii=False, indent=2, default=str)
@@ -117,7 +98,7 @@ class InviteQueryPlugin(Star):
                     self.invite_data[user_id]['nickname'] = name
                     updated += 1
             if updated:
-                self.save()
+                self.save_data()
         except Exception as e:
             logger.debug(f'[invite-debug] 同步群名片异常: {e}')
 
@@ -274,7 +255,7 @@ class InviteQueryPlugin(Star):
                         "leave_time": None
                     }
                     logger.info(f"[invite debug] 邀请入群已记: user_id={user_id}, inviter={operator_id}")
-                    self.save()
+                    self.save_data()
                 else:
                     # 无 operator 视为主动或未识别，记为主动
                     self.invite_data.setdefault(str(user_id), {})
@@ -288,7 +269,7 @@ class InviteQueryPlugin(Star):
                         "leave_time": None
                     }
                     logger.info(f"[invite debug] 主动/未知方式入群已记: user_id={user_id}, sub_type={sub_type}")
-                    self.save()
+                    self.save_data()
             elif notice_type == "group_decrease":
                 # 成员退群/被踢
                 if sub_type == "leave":
@@ -298,7 +279,7 @@ class InviteQueryPlugin(Star):
                         logger.info(f"[invite debug] 成员退群: user_id={user_id}")
                     else:
                         logger.debug(f"[invite debug] 退群用户未在记录中: user_id={user_id}")
-                    self.save()
+                    self.save_data()
                 elif sub_type == "kick":
                     if str(user_id) in self.invite_data:
                         self.invite_data[str(user_id)]["leave_type"] = f"被踢({operator_id})"
@@ -306,7 +287,7 @@ class InviteQueryPlugin(Star):
                         logger.info(f"[invite debug] 成员被踢: user_id={user_id}, by {operator_id}")
                     else:
                         logger.debug(f"[invite debug] 被踢用户未在记录中: user_id={user_id}")
-                    self.save()
+                    self.save_data()
                 else:
                     logger.debug(f"[invite debug] 未识别的减少子类型: sub_type={sub_type}")
         else:
@@ -325,15 +306,7 @@ class InviteQueryPlugin(Star):
             raw = getattr(event.message_obj, 'raw_message', {})
             group_id = str(raw.get('group_id', None)) if raw else None
         await self.sync_all_group_members(group_id)
-        from astrbot.api.message_components import At
-        for seg in getattr(event.message_obj, "message", []):
-            if isinstance(seg, At):
-                user_id = str(seg.qq)
-                break
-            if getattr(seg, 'type', None) == 'at':
-                data = getattr(seg, 'data', {})
-                user_id = str(data.get('qq', '')) or str(getattr(seg, 'qq', ''))
-                break
+        user_id = await self.get_user_id_from_event(event, qq)
         if not user_id:
             arg_qq = qq.strip()
             if not arg_qq:
@@ -375,11 +348,11 @@ class InviteQueryPlugin(Star):
                 "leave_time": None
             }
             self.invite_data[str(user_id)] = member
-            self.save()
+            self.save_data()
             created = True
         # 始终刷新本地nickname缓存
         self.invite_data[str(user_id)]["nickname"] = name if name else user_id
-        self.save()
+        self.save_data()
         inviter = member.get("inviter")
         inviter_name = None
         if self.config.get("show_inviter", True) and inviter:
