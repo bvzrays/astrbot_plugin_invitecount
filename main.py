@@ -491,12 +491,14 @@ class InviteQueryPlugin(Star):
     @filter.command("邀请奖励")
     async def cmd_invite_reward(self, event: AstrMessageEvent):
         msg = self.config.get("reward_message", "暂无奖励内容\n请联系管理员在WebUI配置奖励说明")
+        # 提前处理html内容中的换行
+        msg_html = msg.replace("\n", "<br>")
         html_body = f"""
 <div style='background:__BG__;'>
   <div style='background:rgba(255,255,255,0.92);backdrop-filter: blur(5.5px);margin:17px 23px 18px 18px;padding:16px 17px 15px 19px;border-radius:14px;'>
     <div style='text-align:center;font-weight:bold;color:#f49a1e;font-size:1.38rem;letter-spacing:2px;text-shadow:0 3px 22px #ffe6bf91;'>🎁邀请奖励</div>
     <hr style='border:none;border-top:1px solid #fae5be;margin:9.5px 0 13px 0'>
-    <div style='font-size:1.07rem;color:#8d5a19;padding:6px 3px 10px 3px;'>{msg.replace('\n','<br>')}</div>
+    <div style='font-size:1.07rem;color:#8d5a19;padding:6px 3px 10px 3px;'>{msg_html}</div>
     <div style='text-align:right;font-size:.91rem;color:#b7ab7d;margin-top:13px;'>奖励内容由WebUI配置</div>
   </div>
 </div>
