@@ -1,0 +1,22 @@
+{
+  "show_inviter": {
+    "description": "是否显示邀请人群名片",
+    "type": "bool",
+    "default": true
+  },
+  "only_stat_valid": {
+    "description": "是否只统计有效邀请(没被踢和自己未退群)",
+    "type": "bool",
+    "default": false
+  },
+  "reward_message": {
+    "description": "邀请奖励内容（支持多行文本和html）",
+    "type": "text",
+    "default": "暂无奖励，快去群公告/WebUI 配置奖励吧！"
+  },
+  "enable_image_render": {
+    "description": "是否将查询内容渲染为图片，开启后查询结果会以图片形式发送",
+    "type": "bool",
+    "default": false
+  }
+}
