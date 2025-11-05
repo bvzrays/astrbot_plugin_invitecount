@@ -779,3 +779,111 @@ class InviteQueryPlugin(Star):
     async def terminate(self):
         # 卸载插件时可扩展资源释放逻辑
         pass
+
+    @filter.command("邀请迁移")
+    async def migrate_invite_data(self, event: AstrMessageEvent, 目标: str = "group"):
+        """将旧版扁平结构邀请数据迁移到作用域桶。
+        用法：
+        /邀请迁移                 # 默认迁移到当前群的 group 桶
+        /邀请迁移 group           # 迁移到当前群的 group 桶
+        /邀请迁移 user            # 迁移到 user 桶（为每个用户建立独立桶）
+        /邀请迁移 global          # 迁移到 global 桶（全局共享）
+        /邀请迁移 帮助            # 显示帮助
+        仅群管理员可执行。
+        """
+        try:
+            if str(目标).strip() in {"help", "帮助", "?"}:
+                help_text = (
+                    "用法:\n"
+                    "/邀请迁移              —— 默认迁移到当前群的 group 桶\n"
+                    "/邀请迁移 group        —— 迁移到当前群的 group 桶\n"
+                    "/邀请迁移 user         —— 迁移到 user 桶（每用户独立）\n"
+                    "/邀请迁移 global       —— 迁移到 global 桶（全局共享）\n"
+                )
+                yield event.plain_result(help_text)
+                return
+
+            # 仅管理员
+            if not self._is_group_admin(event):
+                yield event.plain_result("仅群管理员可执行此操作")
+                return
+
+            # 识别 legacy：顶层 key 为用户ID、value 为包含 nickname/join_type 的 dict，且 key 不含 ':'
+            legacy = {}
+            for k, v in list(self.invite_data.items()):
+                if isinstance(k, str) and isinstance(v, dict) and \
+                   ("nickname" in v or "join_type" in v) and \
+                   (":" not in k):
+                    legacy[k] = v
+
+            if not legacy:
+                yield event.plain_result("未发现可迁移的旧版数据（或已迁移）")
+                return
+
+            mode = str(目标 or "group").strip().lower()
+            platform = event.get_platform_name() if hasattr(event, "get_platform_name") else "default"
+
+            moved = 0
+            skipped = 0
+
+            if mode == "group":
+                # 迁移到当前群 group 桶
+                gid = None
+                if hasattr(event, 'get_group_id'):
+                    gid = getattr(event, 'get_group_id', lambda: None)() or None
+                if not gid:
+                    raw = getattr(event.message_obj, 'raw_message', {})
+                    gid = str(raw.get('group_id', None)) if raw else None
+                if not gid:
+                    yield event.plain_result("无法确定当前群ID，无法迁移到群桶")
+                    return
+
+                target_ctx = f"{platform}:G:{gid}"
+                target_bucket = self.invite_data.setdefault(target_ctx, {})
+
+                # 优先用群成员列表过滤，仅迁移当前群内相关用户（无法获取则全部迁移）
+                group_members = None
+                try:
+                    if hasattr(self.context, 'get_group_member_list'):
+                        members = await self.context.get_group_member_list(str(gid))
+                        group_members = {str(m.get('user_id')) for m in members}
+                except Exception:
+                    group_members = None
+
+                for uid, rec in legacy.items():
+                    if group_members is not None and uid not in group_members:
+                        skipped += 1
+                        continue
+                    target_bucket[uid] = rec
+                    moved += 1
+                    # 从顶层移除旧记录
+                    self.invite_data.pop(uid, None)
+
+            elif mode == "user":
+                # 每个用户独立 user 桶
+                for uid, rec in legacy.items():
+                    ctx = f"{platform}:U:{uid}"
+                    bucket = self.invite_data.setdefault(ctx, {})
+                    bucket[uid] = rec
+                    moved += 1
+                    self.invite_data.pop(uid, None)
+
+            elif mode == "global":
+                ctx = f"{platform}:GLOBAL"
+                bucket = self.invite_data.setdefault(ctx, {})
+                for uid, rec in legacy.items():
+                    bucket[uid] = rec
+                    moved += 1
+                    self.invite_data.pop(uid, None)
+            else:
+                yield event.plain_result("无效参数，请使用 group/user/global 之一或查看 /邀请迁移 帮助")
+                return
+
+            self.save()
+            msg = f"迁移完成：已迁移 {moved} 条，跳过 {skipped} 条"
+            if mode == "group" and skipped:
+                msg += "（非本群成员跳过）"
+            yield event.plain_result(msg)
+        except Exception as e:
+            logger.error(f"邀请数据迁移失败: {e}")
+            yield event.plain_result("迁移失败，请查看日志")
