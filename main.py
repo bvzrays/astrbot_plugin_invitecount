@@ -582,9 +582,18 @@ class InviteQueryPlugin(Star):
         elif mode in {"月","month"}:
             cutoff = now - timedelta(days=30)
             period_display = "最近30天"
-        # 依据作用域选择数据桶
+        # 依据作用域选择数据桶（需要提供当前群ID，避免 group 模式落入 default 桶）
         sender_uid = event.get_sender_id() if hasattr(event, 'get_sender_id') else None
-        ctx_id_rank = self._ctx_id_for(event, group_id=None, user_id=sender_uid)
+        curr_group_id = None
+        if hasattr(event, 'get_group_id'):
+            try:
+                curr_group_id = getattr(event, 'get_group_id', lambda: None)() or None
+            except Exception:
+                curr_group_id = None
+        if not curr_group_id:
+            raw = getattr(event.message_obj, 'raw_message', {})
+            curr_group_id = str(raw.get('group_id', None)) if raw else None
+        ctx_id_rank = self._ctx_id_for(event, group_id=curr_group_id, user_id=sender_uid)
         bucket_rank = self._get_bucket_by_ctx(ctx_id_rank)
 
         # 汇总数据生成（当前作用域桶）
