@@ -140,6 +140,29 @@ class InviteQueryPlugin(Star):
             logger.debug(f'[invite debug] get_group_member_list失败: {e}')
         return name
 
+    def _ctx_id_for(self, event: AstrMessageEvent, group_id: str | None, user_id: str | None) -> str:
+        """根据 storage_scope 生成上下文 ID。
+        - global:  platform:GLOBAL
+        - group:   platform:G:<group_id>
+        - user:    platform:U:<user_id>
+        注意：事件通知里没有 sender 的语义，这里以被记录用户 user_id 作为 user 作用域的锚点。
+        """
+        try:
+            scope = str(self.config.get("storage_scope", "global")).lower()
+        except Exception:
+            scope = "global"
+        platform = event.get_platform_name() if hasattr(event, "get_platform_name") else "default"
+        if scope == "group":
+            key = str(group_id or "default")
+            return f"{platform}:G:{key}"
+        if scope == "user":
+            key = str(user_id or (event.get_sender_id() if hasattr(event, "get_sender_id") else "default"))
+            return f"{platform}:U:{key}"
+        return f"{platform}:GLOBAL"
+
+    def _get_bucket_by_ctx(self, ctx_id: str) -> dict:
+        return self.invite_data.setdefault(ctx_id, {}) if isinstance(self.invite_data, dict) else {}
+
     def _is_group_admin(self, event: AstrMessageEvent) -> bool:
         """检查是否为群管理员"""
         # 优先用 AstrBot 封装判定
@@ -307,14 +330,16 @@ class InviteQueryPlugin(Star):
                 except Exception as e:
                     logger.debug(f"[invite debug] 获取成员名异常: {e}")
                     member_name = user_id
+                # 依据作用域选择数据桶
+                ctx_id = self._ctx_id_for(event, group_id, user_id)
+                bucket = self._get_bucket_by_ctx(ctx_id)
                 if sub_type == "invite" and operator_id:
                     try:
                         operator_name = await self.try_get_nickname(group_id, operator_id)
                     except Exception as e:
                         logger.debug(f"[invite debug] 获取邀请人名异常: {e}")
                         operator_name = operator_id
-                    self.invite_data.setdefault(str(user_id), {})
-                    self.invite_data[str(user_id)] = {
+                    bucket[str(user_id)] = {
                         "nickname": member_name,
                         "inviter": str(operator_id),
                         "inviter_name": operator_name,
@@ -327,8 +352,7 @@ class InviteQueryPlugin(Star):
                     self.save()
                 else:
                     # 无 operator 视为主动或未识别，记为主动
-                    self.invite_data.setdefault(str(user_id), {})
-                    self.invite_data[str(user_id)] = {
+                    bucket[str(user_id)] = {
                         "nickname": member_name,
                         "inviter": None,
                         "inviter_name": None,
@@ -341,18 +365,20 @@ class InviteQueryPlugin(Star):
                     self.save()
             elif notice_type == "group_decrease":
                 # 成员退群/被踢
+                ctx_id = self._ctx_id_for(event, group_id, user_id)
+                bucket = self._get_bucket_by_ctx(ctx_id)
                 if sub_type == "leave":
-                    if str(user_id) in self.invite_data:
-                        self.invite_data[str(user_id)]["leave_type"] = "自己退群"
-                        self.invite_data[str(user_id)]["leave_time"] = time
+                    if str(user_id) in bucket:
+                        bucket[str(user_id)]["leave_type"] = "自己退群"
+                        bucket[str(user_id)]["leave_time"] = time
                         logger.info(f"[invite debug] 成员退群: user_id={user_id}")
                     else:
                         logger.debug(f"[invite debug] 退群用户未在记录中: user_id={user_id}")
                     self.save()
                 elif sub_type == "kick":
-                    if str(user_id) in self.invite_data:
-                        self.invite_data[str(user_id)]["leave_type"] = f"被踢({operator_id})"
-                        self.invite_data[str(user_id)]["leave_time"] = time
+                    if str(user_id) in bucket:
+                        bucket[str(user_id)]["leave_type"] = f"被踢({operator_id})"
+                        bucket[str(user_id)]["leave_time"] = time
                         logger.info(f"[invite debug] 成员被踢: user_id={user_id}, by {operator_id}")
                     else:
                         logger.debug(f"[invite debug] 被踢用户未在记录中: user_id={user_id}")
@@ -394,7 +420,10 @@ class InviteQueryPlugin(Star):
                 user_id = arg_qq
             else:
                 user_id = event.get_sender_id()
-        member = self.invite_data.get(str(user_id))
+        # 依据作用域选择数据桶
+        ctx_id = self._ctx_id_for(event, group_id, user_id)
+        bucket = self._get_bucket_by_ctx(ctx_id)
+        member = bucket.get(str(user_id))
         created = False
         name = await self.safe_get_member_name_by_list(event, group_id, user_id)
         # fallback如有必要
@@ -424,11 +453,11 @@ class InviteQueryPlugin(Star):
                 "leave_type": None,
                 "leave_time": None
             }
-            self.invite_data[str(user_id)] = member
+            bucket[str(user_id)] = member
             self.save()
             created = True
         # 始终刷新本地nickname缓存
-        self.invite_data[str(user_id)]["nickname"] = name if name else user_id
+        bucket[str(user_id)]["nickname"] = name if name else user_id
         self.save()
         inviter = member.get("inviter")
         inviter_name = None
@@ -451,7 +480,7 @@ class InviteQueryPlugin(Star):
                 days_ago = f"{(now - join_dt).days}天前({join_dt.strftime('%Y-%m-%d')})"
             except Exception:
                 days_ago = join_time
-        all_invited = [(u, v) for u, v in self.invite_data.items() if v.get("inviter") == str(user_id)]
+        all_invited = [(u, v) for u, v in bucket.items() if isinstance(v, dict) and v.get("inviter") == str(user_id)]
         if self.config.get("only_stat_valid", False):
             invited = [item for item in all_invited if not item[1].get("leave_type")]
         else:
@@ -553,10 +582,15 @@ class InviteQueryPlugin(Star):
         elif mode in {"月","month"}:
             cutoff = now - timedelta(days=30)
             period_display = "最近30天"
-        # 汇总数据生成
+        # 依据作用域选择数据桶
+        sender_uid = event.get_sender_id() if hasattr(event, 'get_sender_id') else None
+        ctx_id_rank = self._ctx_id_for(event, group_id=None, user_id=sender_uid)
+        bucket_rank = self._get_bucket_by_ctx(ctx_id_rank)
+
+        # 汇总数据生成（当前作用域桶）
         count_map = {}  # inviter: [有效, 总, 无效]
         inviter_name_map = {}
-        for v in self.invite_data.values():
+        for v in bucket_rank.values():
             inviter = v.get("inviter")
             join_time_str = v.get("join_time")
             # 判断是否在时间窗口内
@@ -578,7 +612,7 @@ class InviteQueryPlugin(Star):
             else:
                 count_map[inviter][2] += 1  # 无效
             if inviter not in inviter_name_map or not inviter_name_map[inviter]:
-                inviter_name_map[inviter] = self.invite_data.get(inviter, {}).get("nickname", inviter)
+                inviter_name_map[inviter] = bucket_rank.get(inviter, {}).get("nickname", inviter)
         # 排序模式
         display_mode = "有效邀请"
         if mode in {"总", "全部", "all", "人数", "总人数"}:
@@ -692,6 +726,25 @@ class InviteQueryPlugin(Star):
                 
                 # 重置为默认值
                 bucket[str(target_uid)] = {
+                    "nickname": username if username else str(target_uid),
+                    "inviter": None,
+                    "inviter_name": None,
+                    "join_type": None,
+                    "join_time": None,
+                    "leave_type": None,
+                    "leave_time": None
+                }
+                self.save()
+                yield event.plain_result(f"已重置成员 {username or target_uid} 的邀请数据")
+                return
+            # 若群维度未命中，回退到当前 storage_scope 对应的数据桶
+            ctx_id2 = self._ctx_id_for(event, group_id, target_uid)
+            bucket2 = self._get_bucket_by_ctx(ctx_id2)
+            if str(target_uid) in bucket2:
+                username = bucket2[str(target_uid)].get("nickname", "")
+                if not username:
+                    username = await self.safe_get_member_name_by_list(event, group_id, target_uid)
+                bucket2[str(target_uid)] = {
                     "nickname": username if username else str(target_uid),
                     "inviter": None,
                     "inviter_name": None,
