@@ -140,6 +140,56 @@ class InviteQueryPlugin(Star):
             logger.debug(f'[invite debug] get_group_member_list失败: {e}')
         return name
 
+    def _is_group_admin(self, event: AstrMessageEvent) -> bool:
+        """检查是否为群管理员"""
+        # 优先用 AstrBot 封装判定
+        try:
+            if event.is_admin():
+                return True
+        except Exception:
+            pass
+        # 兼容 OneBot v11：从 raw_message.sender.role 读取
+        try:
+            raw = event.message_obj.raw_message
+            if isinstance(raw, dict):
+                sender = raw.get("sender", {}) or {}
+                role = str(sender.get("role", "")).lower()
+                if role in {"owner", "admin"}:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _get_ctx_id(self, event: AstrMessageEvent) -> str:
+        """根据配置的作用域返回上下文ID"""
+        try:
+            scope = (self.config.get("storage_scope") or "global").lower()
+            platform = event.get_platform_name() if hasattr(event, "get_platform_name") else "default"
+            if scope == "global":
+                return f"{platform}:GLOBAL"
+            if scope == "user":
+                key = event.get_sender_id()
+                return f"{platform}:U:{key}"
+            # default group
+            key = event.get_group_id() or event.get_session_id() or "default"
+            return f"{platform}:G:{key}"
+        except Exception:
+            return "default"
+
+    def _get_group_ctx_bucket(self, event: AstrMessageEvent) -> dict:
+        """获取当前群维度的数据桶（用于管理员重置），不受 storage_scope 影响"""
+        try:
+            platform = event.get_platform_name() if hasattr(event, "get_platform_name") else "default"
+            gid = event.get_group_id() or event.get_session_id() or "default"
+            ctx_id = f"{platform}:G:{gid}"
+            # 如果数据结构是嵌套的，返回对应bucket；否则返回整个invite_data
+            if isinstance(self.invite_data.get(ctx_id), dict):
+                return self.invite_data[ctx_id]
+            # 兼容旧数据结构（扁平）
+            return self.invite_data
+        except Exception:
+            return self.invite_data
+
     async def try_render_html(self, event, html_body, data, fallback_text):
         """尝试用 AstrBot 图片渲染接口(html_render)输出，支持随机本地背景且卡片全填充，失败则返回文本。"""
         if not self.config.get("enable_image_render", False):
@@ -594,6 +644,84 @@ class InviteQueryPlugin(Star):
 """
         async for result in self.try_render_html(event, html_body, {}, msg):
             yield result
+
+    @filter.command("邀请重置")
+    async def reset_self(self, event: AstrMessageEvent, 目标: str = ""):
+        """重置指定成员的邀请数据"""
+        try:
+            # 仅群管理员可用
+            if not self._is_group_admin(event):
+                yield event.plain_result("仅群管理员可执行此操作")
+                return
+
+            # 识别重置对象：优先从 @ 提取，其次解析参数为 QQ
+            target_uid = None
+            try:
+                for comp in event.get_messages():
+                    if isinstance(comp, Comp.At) and comp.qq:
+                        target_uid = str(comp.qq)
+                        break
+            except Exception:
+                pass
+
+            if not target_uid and 目标:
+                # 去除非数字字符，尝试作为 QQ 号
+                digits = ''.join(ch for ch in str(目标) if ch.isdigit())
+                if digits:
+                    target_uid = digits
+
+            # 默认目标为自己
+            if not target_uid:
+                target_uid = event.get_sender_id()
+
+            # 获取群维度数据桶
+            bucket = self._get_group_ctx_bucket(event)
+            
+            # 获取群ID用于获取用户名
+            group_id = None
+            if hasattr(event, 'get_group_id'):
+                group_id = getattr(event, 'get_group_id', lambda: None)() or None
+            if not group_id:
+                raw = getattr(event.message_obj, 'raw_message', {})
+                group_id = str(raw.get('group_id', None)) if raw else None
+
+            if str(target_uid) in bucket:
+                username = bucket[str(target_uid)].get("nickname", "")
+                if not username:
+                    username = await self.safe_get_member_name_by_list(event, group_id, target_uid)
+                
+                # 重置为默认值
+                bucket[str(target_uid)] = {
+                    "nickname": username if username else str(target_uid),
+                    "inviter": None,
+                    "inviter_name": None,
+                    "join_type": None,
+                    "join_time": None,
+                    "leave_type": None,
+                    "leave_time": None
+                }
+                self.save()
+                yield event.plain_result(f"已重置成员 {username or target_uid} 的邀请数据")
+                return
+            yield event.plain_result("未找到该成员的邀请数据")
+        except Exception as e:
+            logger.error(f"重置失败: {e}")
+            yield event.plain_result("重置失败，请稍后再试")
+
+    @filter.command("全局邀请重置")
+    async def reset_all(self, event: AstrMessageEvent):
+        """清空全局邀请数据"""
+        try:
+            # 管理员才能执行（全局清空较危险）
+            if not self._is_group_admin(event):
+                yield event.plain_result("仅群管理员可执行此操作")
+                return
+            self.invite_data.clear()
+            self.save()
+            yield event.plain_result("已清空全局邀请数据")
+        except Exception as e:
+            logger.error(f"全局重置失败: {e}")
+            yield event.plain_result("全局重置失败，请稍后再试")
 
     async def terminate(self):
         # 卸载插件时可扩展资源释放逻辑

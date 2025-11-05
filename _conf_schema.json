@@ -18,5 +18,11 @@
     "description": "是否将查询内容渲染为图片，开启后查询结果会以图片形式发送",
     "type": "bool",
     "default": false
+  },
+  "storage_scope": {
+    "description": "数据统计作用域（group=按群，user=按用户，global=全局）",
+    "type": "string",
+    "options": ["group", "user", "global"],
+    "default": "global"
   }
 }
